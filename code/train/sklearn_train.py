@@ -110,34 +110,35 @@ for tf in TIMEFRAMES:
 
 # %%
 # Define hyperparameter grids for each algorithm
+# Note: Reduced grid sizes for faster training while keeping impactful parameters
 param_grids = {
     'DecisionTree': {
         'model': DecisionTreeClassifier(random_state=RANDOM_STATE),
         'params': {
-            'max_depth': [3, 5, 7, 10, 15, None],
-            'min_samples_split': [2, 5, 10, 20],
-            'min_samples_leaf': [1, 2, 5, 10],
+            'max_depth': [3, 5, 7, 10],
+            'min_samples_split': [2, 5, 10],
+            'min_samples_leaf': [1, 2, 5],
             'criterion': ['gini', 'entropy']
         }
     },
     'RandomForest': {
         'model': RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=N_JOBS),
         'params': {
-            'n_estimators': [100, 200, 300],
-            'max_depth': [5, 10, 15, 20, None],
-            'min_samples_split': [2, 5, 10],
-            'min_samples_leaf': [1, 2, 5],
-            'max_features': ['sqrt', 'log2', None]
+            'n_estimators': [100, 200],
+            'max_depth': [5, 10, 15],
+            'min_samples_split': [2, 5],
+            'min_samples_leaf': [1, 2],
+            'max_features': ['sqrt', 'log2']
         }
     },
     'HistGradientBoosting': {
         'model': HistGradientBoostingClassifier(random_state=RANDOM_STATE),
         'params': {
-            'learning_rate': [0.01, 0.05, 0.1, 0.2],
-            'max_iter': [100, 200, 300],
-            'max_depth': [3, 5, 7, 10, None],
-            'min_samples_leaf': [10, 20, 50],
-            'l2_regularization': [0, 0.1, 1.0]
+            'learning_rate': [0.05, 0.1],
+            'max_iter': [100, 200],
+            'max_depth': [5, 7, 10],
+            'min_samples_leaf': [20, 50],
+            'l2_regularization': [0, 0.1]
         }
     },
     'CatBoost': {
@@ -147,23 +148,23 @@ param_grids = {
             thread_count=N_JOBS
         ),
         'params': {
-            'learning_rate': [0.01, 0.05, 0.1],
-            'depth': [4, 6, 8, 10],
-            'iterations': [100, 200, 300],
-            'l2_leaf_reg': [1, 3, 5, 7]
+            'learning_rate': [0.05, 0.1],
+            'depth': [4, 6, 8],
+            'iterations': [100, 200],
+            'l2_leaf_reg': [1, 3, 5]
         }
     },
     'ANN': {
         'model': Pipeline([
             ('scaler', StandardScaler()),
-            ('mlp', MLPClassifier(random_state=RANDOM_STATE, max_iter=500, early_stopping=True))
+            ('mlp', MLPClassifier(random_state=RANDOM_STATE, max_iter=300, early_stopping=True))
         ]),
         'params': {
-            'mlp__hidden_layer_sizes': [(64,), (128,), (64, 32), (128, 64), (128, 64, 32)],
-            'mlp__activation': ['relu', 'tanh'],
-            'mlp__alpha': [0.0001, 0.001, 0.01],
+            'mlp__hidden_layer_sizes': [(64,), (128,), (64, 32), (128, 64)],
+            'mlp__activation': ['relu'],
+            'mlp__alpha': [0.001, 0.01],
             'mlp__learning_rate_init': [0.001, 0.01],
-            'mlp__batch_size': [32, 64, 128]
+            'mlp__batch_size': [64, 128]
         }
     }
 }
