@@ -73,7 +73,7 @@ df_combined = pd.concat([df_train, df_test], ignore_index=True)
 # %%
 # Define variable lists for TableOne
 
-# Continuous variables (will use median [IQR] for non-normal distributions)
+# Continuous variables (will be reported as Mean ± SD)
 continuous_vars = [
     # Vital signs
     'a_sbp_24h_mean', 'a_dbp_24h_mean', 'pulse_24h_mean', 'resp_24h_mean', 'spo2_24h_mean',
@@ -217,13 +217,12 @@ order = {
 
 # %%
 # Create TableOne
-# nonnormal: use median [IQR] for all continuous variables (typical for clinical data)
+# By default, continuous variables are reported as Mean ± SD
 table1 = TableOne(
     df_combined,
     columns=columns,
     categorical=categorical_vars,
     groupby='group',
-    nonnormal=continuous_vars,  # Use median [IQR] for all continuous
     rename=labels,
     order=order,
     pval=True,
@@ -238,9 +237,9 @@ table1 = TableOne(
 print("\n" + "="*100)
 print("TABLE ONE: Baseline Characteristics (Pre-Imputation Values)")
 print("="*100)
-print("\nContinuous variables: Median [Q1, Q3]")
+print("\nContinuous variables: Mean ± SD")
 print("Categorical/Binary variables: n (%)")
-print("P-values: Mann-Whitney U (continuous), Chi-square (categorical), Bonferroni adjusted")
+print("P-values: t-test (continuous), Chi-square (categorical), Bonferroni adjusted")
 print("*Transfusion volumes are reported among recipients only")
 print("-"*100)
 print(table1.tabulate(tablefmt="fancy_grid"))

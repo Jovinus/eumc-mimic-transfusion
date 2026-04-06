@@ -1,0 +1,471 @@
+# %%
+"""
+Classification Model Training - TRANSFUSED PATIENTS ONLY
+=========================================================
+Subgroup analysis for patients who received at least one transfusion.
+
+Algorithms: Decision Tree, Random Forest, HistGradientBoosting, CatBoost, ANN (MLP)
+Hyperparameter tuning with 5-fold cross-validation
+
+Uses all transfusion timeframes (24h, 48h, 72h) as features in a single model.
+"""
+
+import pandas as pd
+import numpy as np
+import pickle
+import warnings
+from pathlib import Path
+from datetime import datetime
+
+from sklearn.model_selection import GridSearchCV, StratifiedKFold, train_test_split
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (
+    roc_auc_score, accuracy_score, precision_score, recall_score, f1_score,
+    average_precision_score, confusion_matrix
+)
+from catboost import CatBoostClassifier
+
+warnings.filterwarnings('ignore')
+
+# %%
+# Configuration
+RANDOM_STATE = 1004
+CV_FOLDS = 5
+N_JOBS = -1
+
+TARGET_COLS = [
+    'icu_mortality',
+    'hospital_mortality', 
+    'mortality_28day',
+    'blood_culture_positive_after_72h',
+    'new_antibiotic_after_72h'
+]
+
+ID_COLS = ['subject_id', 'hadm_id']
+CATEGORICAL_COLS = ['surgery_type']
+TRANSFUSION_TYPES = ['rbc_volume', 'ffp_volume', 'platelet_volume']
+TIMEFRAMES = ['24h', '48h', '72h']
+
+# %%
+# Load processed data
+print("Loading processed data...")
+train_df_orig = pd.read_parquet("../../data/processed/train_data.parquet")
+test_df_orig = pd.read_parquet("../../data/processed/test_data.parquet")
+
+print(f"Original Train shape: {train_df_orig.shape}")
+print(f"Original Test shape: {test_df_orig.shape}")
+
+# %%
+# Filter to patients who received ANY transfusion (across all timeframes)
+def has_any_transfusion(df):
+    """Check if patient received any transfusion within any timeframe."""
+    transfusion_cols = []
+    for tf in TIMEFRAMES:
+        for t in TRANSFUSION_TYPES:
+            col = f"{t}_{tf}"
+            if col in df.columns:
+                transfusion_cols.append(col)
+    return (df[transfusion_cols].fillna(0) > 0).any(axis=1)
+
+
+def filter_transfused_patients(df):
+    """Filter to patients who received any transfusion."""
+    mask = has_any_transfusion(df)
+    return df[mask].copy()
+
+
+# %%
+# Show transfusion statistics
+print("\n" + "="*60)
+print("Transfusion Statistics")
+print("="*60)
+
+train_mask = has_any_transfusion(train_df_orig)
+test_mask = has_any_transfusion(test_df_orig)
+
+print(f"\nPatients with any transfusion (any timeframe):")
+print(f"  Train: {train_mask.sum()} / {len(train_df_orig)} ({train_mask.mean()*100:.1f}%) received transfusion")
+print(f"  Test:  {test_mask.sum()} / {len(test_df_orig)} ({test_mask.mean()*100:.1f}%) received transfusion")
+
+# %%
+# Encode categorical columns
+label_encoders = {}
+for col in CATEGORICAL_COLS:
+    if col in train_df_orig.columns:
+        le = LabelEncoder()
+        train_df_orig[col] = le.fit_transform(train_df_orig[col].astype(str))
+        test_df_orig[col] = le.transform(test_df_orig[col].astype(str))
+        label_encoders[col] = le
+        print(f"Encoded {col}: {le.classes_}")
+
+
+# %%
+def get_feature_cols(df):
+    """Get feature columns using all transfusion timeframes (24h, 48h, 72h)."""
+    exclude_cols = ID_COLS + TARGET_COLS
+    feature_cols = [col for col in df.columns if col not in exclude_cols]
+    return feature_cols
+
+
+# %%
+# Define hyperparameter grids (same as main training)
+param_grids = {
+    'DecisionTree': {
+        'model': DecisionTreeClassifier(random_state=RANDOM_STATE),
+        'params': {
+            'max_depth': [3, 5, 7, 10],
+            'min_samples_split': [2, 5, 10],
+            'min_samples_leaf': [1, 2, 5],
+            'criterion': ['gini', 'entropy']
+        }
+    },
+    'RandomForest': {
+        'model': RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=N_JOBS),
+        'params': {
+            'n_estimators': [100, 200],
+            'max_depth': [5, 10, 15],
+            'min_samples_split': [2, 5],
+            'min_samples_leaf': [1, 2],
+            'max_features': ['sqrt', 'log2']
+        }
+    },
+    'HistGradientBoosting': {
+        'model': HistGradientBoostingClassifier(random_state=RANDOM_STATE),
+        'params': {
+            'learning_rate': [0.05, 0.1],
+            'max_iter': [100, 200],
+            'max_depth': [5, 7, 10],
+            'min_samples_leaf': [20, 50],
+            'l2_regularization': [0, 0.1]
+        }
+    },
+    'CatBoost': {
+        'model': CatBoostClassifier(
+            random_state=RANDOM_STATE, 
+            verbose=0,
+            thread_count=N_JOBS
+        ),
+        'params': {
+            'learning_rate': [0.05, 0.1],
+            'depth': [4, 6, 8],
+            'iterations': [100, 200],
+            'l2_leaf_reg': [1, 3, 5]
+        }
+    },
+    'ANN': {
+        'model': Pipeline([
+            ('scaler', StandardScaler()),
+            ('mlp', MLPClassifier(random_state=RANDOM_STATE, max_iter=300, early_stopping=True))
+        ]),
+        'params': {
+            'mlp__hidden_layer_sizes': [(64,), (128,), (64, 32), (128, 64)],
+            'mlp__activation': ['relu'],
+            'mlp__alpha': [0.001, 0.01],
+            'mlp__learning_rate_init': [0.001, 0.01],
+            'mlp__batch_size': [64, 128]
+        }
+    }
+}
+
+
+# %%
+def train_and_evaluate(X_train, y_train, X_test, y_test, model_name, model, params, cv_folds=5):
+    """Train model with GridSearchCV and evaluate on test set."""
+    print(f"\n{'='*60}")
+    print(f"Training {model_name}...")
+    print(f"{'='*60}")
+    
+    start_time = datetime.now()
+    
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=RANDOM_STATE)
+    
+    grid_search = GridSearchCV(
+        estimator=model,
+        param_grid=params,
+        cv=cv,
+        scoring='roc_auc',
+        n_jobs=N_JOBS,
+        verbose=1,
+        refit=True
+    )
+    
+    grid_search.fit(X_train, y_train)
+    
+    training_time = (datetime.now() - start_time).total_seconds()
+    
+    best_model = grid_search.best_estimator_
+    best_params = grid_search.best_params_
+    best_cv_score = grid_search.best_score_
+    
+    print(f"\nBest Parameters: {best_params}")
+    print(f"Best CV ROC-AUC: {best_cv_score:.4f}")
+    
+    y_pred = best_model.predict(X_test)
+    y_pred_proba = best_model.predict_proba(X_test)[:, 1]
+    
+    metrics = {
+        'model_name': model_name,
+        'best_params': best_params,
+        'cv_roc_auc': best_cv_score,
+        'test_roc_auc': roc_auc_score(y_test, y_pred_proba),
+        'test_accuracy': accuracy_score(y_test, y_pred),
+        'test_precision': precision_score(y_test, y_pred, zero_division=0),
+        'test_recall': recall_score(y_test, y_pred, zero_division=0),
+        'test_f1': f1_score(y_test, y_pred, zero_division=0),
+        'test_average_precision': average_precision_score(y_test, y_pred_proba),
+        'confusion_matrix': confusion_matrix(y_test, y_pred),
+        'training_time_seconds': training_time
+    }
+    
+    print(f"\nTest Set Performance:")
+    print(f"  ROC-AUC: {metrics['test_roc_auc']:.4f}")
+    print(f"  Accuracy: {metrics['test_accuracy']:.4f}")
+    print(f"  Precision: {metrics['test_precision']:.4f}")
+    print(f"  Recall: {metrics['test_recall']:.4f}")
+    print(f"  F1 Score: {metrics['test_f1']:.4f}")
+    print(f"  Average Precision: {metrics['test_average_precision']:.4f}")
+    print(f"  Training Time: {training_time:.1f} seconds")
+    
+    return best_model, metrics
+
+
+# %%
+def train_all_models_for_target(target_name, X_train, y_train, X_test, y_test, param_grids):
+    """Train all models for a single target variable."""
+    print(f"\n{'#'*70}")
+    print(f"# TARGET: {target_name}")
+    print(f"# Train samples: {len(y_train)}, positive rate: {y_train.mean():.3f}")
+    print(f"# Test samples: {len(y_test)}, positive rate: {y_test.mean():.3f}")
+    print(f"{'#'*70}")
+    
+    models = {}
+    results = []
+    
+    for model_name, config in param_grids.items():
+        try:
+            model, metrics = train_and_evaluate(
+                X_train, y_train,
+                X_test, y_test,
+                model_name,
+                config['model'],
+                config['params'],
+                cv_folds=CV_FOLDS
+            )
+            models[model_name] = model
+            metrics['target'] = target_name
+            results.append(metrics)
+        except Exception as e:
+            print(f"Error training {model_name}: {str(e)}")
+            continue
+    
+    return models, results
+
+
+# %%
+# Create output directories
+output_dir = Path("../../result/models_transfused")
+predictions_dir = Path("../../result/predictions_transfused")
+output_dir.mkdir(parents=True, exist_ok=True)
+predictions_dir.mkdir(parents=True, exist_ok=True)
+
+# %%
+# Train models for each target (TRANSFUSED PATIENTS ONLY, all timeframes as features)
+all_models = {}  # {target: {model_name: model}}
+all_results = []
+
+# Filter to transfused patients (any transfusion in any timeframe)
+train_df = filter_transfused_patients(train_df_orig)
+test_df = filter_transfused_patients(test_df_orig)
+
+print(f"\nTransfused patients - Train: {len(train_df)}, Test: {len(test_df)}")
+
+# Get feature columns (all timeframes included)
+feature_cols = get_feature_cols(train_df)
+print(f"Number of features: {len(feature_cols)}")
+
+X_train = train_df[feature_cols].values
+X_test = test_df[feature_cols].values
+
+for target in TARGET_COLS:
+    print(f"\n\n{'*'*80}")
+    print(f"Processing target: {target}")
+    print(f"{'*'*80}")
+    
+    y_train = train_df[target].values
+    y_test = test_df[target].values
+    
+    models, results = train_all_models_for_target(
+        target, X_train, y_train, X_test, y_test, param_grids
+    )
+    
+    for r in results:
+        r['n_train'] = len(train_df)
+        r['n_test'] = len(test_df)
+    
+    all_models[target] = models
+    all_results.extend(results)
+
+# %%
+# Create summary results DataFrame
+results_df = pd.DataFrame(all_results)
+
+cols_order = [
+    'target', 'model_name', 'cv_roc_auc', 'test_roc_auc', 
+    'test_accuracy', 'test_precision', 'test_recall', 'test_f1',
+    'test_average_precision', 'training_time_seconds', 'n_train', 'n_test', 'best_params'
+]
+results_df = results_df[[c for c in cols_order if c in results_df.columns]]
+
+print("\n\n" + "="*80)
+print("SUMMARY OF ALL RESULTS (TRANSFUSED PATIENTS)")
+print("="*80)
+print(results_df.to_string(index=False))
+
+# %%
+# Save results
+results_df.to_csv("../../result/model_performance_summary_transfused.csv", index=False)
+print(f"\nResults saved to result/model_performance_summary_transfused.csv")
+
+# %%
+# Save models
+print("\n" + "="*80)
+print("SAVING MODELS")
+print("="*80)
+
+# Get feature columns (all timeframes)
+feature_cols = get_feature_cols(train_df)
+
+# Save feature columns
+with open(output_dir / "feature_columns.pkl", 'wb') as f:
+    pickle.dump(feature_cols, f)
+print(f"Saved: feature_columns.pkl")
+
+# Save SHAP background data
+X_train_sample = train_df[feature_cols].sample(n=min(100, len(train_df)), random_state=RANDOM_STATE)
+X_train_sample.to_parquet(output_dir / "shap_background.parquet", index=False)
+print(f"Saved: shap_background.parquet")
+
+for target, models in all_models.items():
+    for model_name, model in models.items():
+        model_path = output_dir / f"{target}_{model_name}.pkl"
+        with open(model_path, 'wb') as f:
+            pickle.dump(model, f)
+        print(f"Saved: {model_path.name}")
+
+# Save label encoders
+with open(output_dir / "label_encoders.pkl", 'wb') as f:
+    pickle.dump(label_encoders, f)
+
+# Save metadata
+model_metadata = {
+    'targets': TARGET_COLS,
+    'models': list(param_grids.keys()),
+    'feature_cols': feature_cols,
+    'categorical_cols': CATEGORICAL_COLS,
+    'id_cols': ID_COLS,
+    'random_state': RANDOM_STATE,
+    'subgroup': 'transfused_patients'
+}
+with open(output_dir / "model_metadata.pkl", 'wb') as f:
+    pickle.dump(model_metadata, f)
+
+# %%
+# Save best models
+print("\n" + "="*80)
+print("SAVING BEST MODELS")
+print("="*80)
+
+best_models_dir = output_dir / "best"
+best_models_dir.mkdir(parents=True, exist_ok=True)
+
+best_model_info = {}
+
+for target in TARGET_COLS:
+    target_results = results_df[results_df['target'] == target]
+    
+    if len(target_results) == 0:
+        continue
+        
+    best_idx = target_results['test_roc_auc'].idxmax()
+    best_row = target_results.loc[best_idx]
+    best_model_name = best_row['model_name']
+    best_roc_auc = best_row['test_roc_auc']
+    
+    best_model = all_models[target][best_model_name]
+    
+    best_model_path = best_models_dir / f"{target}_best.pkl"
+    with open(best_model_path, 'wb') as f:
+        pickle.dump(best_model, f)
+    
+    best_model_info[target] = {
+        'model_name': best_model_name,
+        'test_roc_auc': best_roc_auc,
+        'cv_roc_auc': best_row['cv_roc_auc'],
+        'best_params': best_row['best_params'],
+        'model_path': str(best_model_path)
+    }
+    
+    print(f"  {target}: {best_model_name} (ROC-AUC: {best_roc_auc:.4f})")
+
+with open(best_models_dir / "best_model_info.pkl", 'wb') as f:
+    pickle.dump(best_model_info, f)
+
+# %%
+# Create comparison with full cohort
+print("\n" + "="*80)
+print("COMPARISON: Full Cohort vs Transfused Patients")
+print("="*80)
+
+# Load full cohort results
+full_results_path = Path("../../result/model_performance_summary.csv")
+if full_results_path.exists():
+    full_results_df = pd.read_csv(full_results_path)
+    
+    comparison_data = []
+    for _, row in results_df.iterrows():
+        full_match = full_results_df[
+            (full_results_df['target'] == row['target']) &
+            (full_results_df['model_name'] == row['model_name'])
+        ]
+        
+        if len(full_match) > 0:
+            comparison_data.append({
+                'Target': row['target'],
+                'Model': row['model_name'],
+                'Full Cohort AUROC': full_match.iloc[0]['test_roc_auc'],
+                'Transfused AUROC': row['test_roc_auc'],
+                'Difference': row['test_roc_auc'] - full_match.iloc[0]['test_roc_auc']
+            })
+    
+    comparison_df = pd.DataFrame(comparison_data)
+    comparison_df.to_csv("../../result/model_comparison_full_vs_transfused.csv", index=False)
+    print("\nComparison saved to result/model_comparison_full_vs_transfused.csv")
+    
+    # Display summary
+    print("\nAUROC Difference (Transfused - Full Cohort):")
+    pivot = comparison_df.pivot_table(
+        index='Model', 
+        columns='Target', 
+        values='Difference', 
+        aggfunc='mean'
+    )
+    print(pivot.round(3).to_string())
+
+# %%
+print("\n\n" + "="*80)
+print("TRAINING COMPLETE - TRANSFUSED PATIENTS SUBGROUP")
+print("="*80)
+print(f"\nOutput files:")
+print(f"  - Results: result/model_performance_summary_transfused.csv")
+print(f"  - Models: result/models_transfused/{{target}}_{{model}}.pkl")
+print(f"  - Best models: result/models_transfused/best/{{target}}_best.pkl")
+print(f"  - Feature columns: result/models_transfused/feature_columns.pkl")
+print(f"  - SHAP background: result/models_transfused/shap_background.parquet")
+print(f"  - Comparison: result/model_comparison_full_vs_transfused.csv")
+print(f"\nTargets processed: {TARGET_COLS}")
+print(f"Models trained: {list(param_grids.keys())}")
+

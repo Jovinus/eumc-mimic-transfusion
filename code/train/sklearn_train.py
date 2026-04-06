@@ -6,7 +6,7 @@ Algorithms: Decision Tree, Random Forest, HistGradientBoosting, CatBoost, ANN (M
 Hyperparameter tuning with 5-fold cross-validation
 Predictions saved for all targets on the entire dataset
 
-Supports multiple timeframes (24h, 48h, 72h) for transfusion data.
+Uses all transfusion timeframes (24h, 48h, 72h) as features in a single model.
 """
 
 import pandas as pd
@@ -36,9 +36,6 @@ RANDOM_STATE = 1004
 CV_FOLDS = 5
 N_JOBS = -1  # Use all available cores
 
-# Timeframes for transfusion data
-TIMEFRAMES = ['24h', '48h', '72h']
-
 # Define target columns
 TARGET_COLS = [
     'icu_mortality',
@@ -54,8 +51,9 @@ ID_COLS = ['subject_id', 'hadm_id']
 # Categorical columns
 CATEGORICAL_COLS = ['surgery_type']
 
-# Transfusion column patterns (will be filtered by timeframe)
+# Transfusion column patterns (all timeframes used)
 TRANSFUSION_TYPES = ['rbc_volume', 'ffp_volume', 'platelet_volume']
+TIMEFRAMES = ['24h', '48h', '72h']
 
 # %%
 # Load data
@@ -79,34 +77,21 @@ for col in CATEGORICAL_COLS:
 
 
 # %%
-def get_feature_cols_for_timeframe(df, timeframe):
+def get_feature_cols(df):
     """
-    Get feature columns for a specific timeframe.
-    
-    Excludes transfusion columns from other timeframes.
-    For example, if timeframe='24h', excludes rbc_volume_48h, rbc_volume_72h, etc.
+    Get feature columns using all transfusion timeframes (24h, 48h, 72h).
     """
-    all_timeframes = ['24h', '48h', '72h']
-    other_timeframes = [tf for tf in all_timeframes if tf != timeframe]
-    
-    # Columns to exclude: transfusion columns from other timeframes
     exclude_cols = ID_COLS + TARGET_COLS
-    for tf in other_timeframes:
-        for trans_type in TRANSFUSION_TYPES:
-            exclude_cols.append(f"{trans_type}_{tf}")
-    
     feature_cols = [col for col in df.columns if col not in exclude_cols]
     return feature_cols
 
 
 # %%
-# Show feature columns for each timeframe
-for tf in TIMEFRAMES:
-    feat_cols = get_feature_cols_for_timeframe(train_df_orig, tf)
-    transfusion_cols_in_tf = [c for c in feat_cols if any(t in c for t in TRANSFUSION_TYPES)]
-    print(f"\n{tf} timeframe:")
-    print(f"  Total features: {len(feat_cols)}")
-    print(f"  Transfusion features: {transfusion_cols_in_tf}")
+# Show feature columns
+feature_cols = get_feature_cols(train_df_orig)
+transfusion_cols = [c for c in feature_cols if any(t in c for t in TRANSFUSION_TYPES)]
+print(f"\nTotal features: {len(feature_cols)}")
+print(f"Transfusion features: {transfusion_cols}")
 
 # %%
 # Define hyperparameter grids for each algorithm
@@ -286,43 +271,32 @@ output_dir.mkdir(parents=True, exist_ok=True)
 predictions_dir.mkdir(parents=True, exist_ok=True)
 
 # %%
-# Train models for each timeframe and target
-all_models = {}  # {timeframe: {target: {model_name: model}}}
+# Train models for each target (using all timeframes as features)
+all_models = {}  # {target: {model_name: model}}
 all_results = []
 
-for timeframe in TIMEFRAMES:
-    print(f"\n\n{'@'*80}")
-    print(f"@ TIMEFRAME: {timeframe}")
-    print(f"{'@'*80}")
+# Get feature columns (all timeframes included)
+feature_cols = get_feature_cols(train_df_orig)
+print(f"\nNumber of features: {len(feature_cols)}")
+
+# Prepare features
+X_train = train_df_orig[feature_cols].values
+X_test = test_df_orig[feature_cols].values
+
+for target in TARGET_COLS:
+    print(f"\n\n{'*'*80}")
+    print(f"Processing target: {target}")
+    print(f"{'*'*80}")
     
-    # Get feature columns for this timeframe
-    feature_cols = get_feature_cols_for_timeframe(train_df_orig, timeframe)
-    print(f"\nNumber of features for {timeframe}: {len(feature_cols)}")
+    y_train = train_df_orig[target].values
+    y_test = test_df_orig[target].values
     
-    # Prepare features for this timeframe
-    X_train = train_df_orig[feature_cols].values
-    X_test = test_df_orig[feature_cols].values
+    models, results = train_all_models_for_target(
+        target, X_train, y_train, X_test, y_test, param_grids
+    )
     
-    all_models[timeframe] = {}
-    
-    for target in TARGET_COLS:
-        print(f"\n\n{'*'*80}")
-        print(f"Processing target: {target} (Timeframe: {timeframe})")
-        print(f"{'*'*80}")
-        
-        y_train = train_df_orig[target].values
-        y_test = test_df_orig[target].values
-        
-        models, results = train_all_models_for_target(
-            target, X_train, y_train, X_test, y_test, param_grids
-        )
-        
-        # Add timeframe info to results
-        for r in results:
-            r['timeframe'] = timeframe
-        
-        all_models[timeframe][target] = models
-        all_results.extend(results)
+    all_models[target] = models
+    all_results.extend(results)
 
 # %%
 # Create summary results DataFrame
@@ -330,7 +304,7 @@ results_df = pd.DataFrame(all_results)
 
 # Reorder columns for better readability
 cols_order = [
-    'timeframe', 'target', 'model_name', 'cv_roc_auc', 'test_roc_auc', 
+    'target', 'model_name', 'cv_roc_auc', 'test_roc_auc', 
     'test_accuracy', 'test_precision', 'test_recall', 'test_f1',
     'test_average_precision', 'training_time_seconds', 'best_params'
 ]
@@ -348,14 +322,12 @@ results_df.to_csv("../../result/model_performance_summary.csv", index=False)
 print(f"\nResults saved to result/model_performance_summary.csv")
 
 # %%
-# Create pivot table for easy comparison (for each timeframe)
-for timeframe in TIMEFRAMES:
-    tf_results = results_df[results_df['timeframe'] == timeframe]
-    pivot_auroc = tf_results.pivot(index='model_name', columns='target', values='test_roc_auc')
-    print(f"\n\nTest ROC-AUC by Model and Target ({timeframe}):")
-    print(pivot_auroc.round(4).to_string())
-    
-    pivot_auroc.to_csv(f"../../result/model_auroc_comparison_{timeframe}.csv")
+# Create pivot table for easy comparison
+pivot_auroc = results_df.pivot(index='model_name', columns='target', values='test_roc_auc')
+print(f"\n\nTest ROC-AUC by Model and Target:")
+print(pivot_auroc.round(4).to_string())
+
+pivot_auroc.to_csv("../../result/model_auroc_comparison.csv")
 
 # %%
 # Save trained models and metadata for SHAP analysis
@@ -363,28 +335,27 @@ print("\n\n" + "="*80)
 print("SAVING MODELS FOR SHAP ANALYSIS")
 print("="*80)
 
-for timeframe, tf_models in all_models.items():
-    # Get feature columns for this timeframe
-    feature_cols = get_feature_cols_for_timeframe(train_df_orig, timeframe)
-    
-    # Save feature columns for this timeframe (needed for SHAP)
-    feature_cols_path = output_dir / f"{timeframe}_feature_columns.pkl"
-    with open(feature_cols_path, 'wb') as f:
-        pickle.dump(feature_cols, f)
-    print(f"Saved feature columns: {feature_cols_path}")
-    
-    # Save a sample of training data for SHAP background (100 samples)
-    X_train_sample = train_df_orig[feature_cols].sample(n=min(100, len(train_df_orig)), random_state=RANDOM_STATE)
-    background_path = output_dir / f"{timeframe}_shap_background.parquet"
-    X_train_sample.to_parquet(background_path, index=False)
-    print(f"Saved SHAP background data: {background_path}")
-    
-    for target, models in tf_models.items():
-        for model_name, model in models.items():
-            model_path = output_dir / f"{timeframe}_{target}_{model_name}.pkl"
-            with open(model_path, 'wb') as f:
-                pickle.dump(model, f)
-            print(f"Saved model: {model_path}")
+# Get feature columns (all timeframes)
+feature_cols = get_feature_cols(train_df_orig)
+
+# Save feature columns (needed for SHAP)
+feature_cols_path = output_dir / "feature_columns.pkl"
+with open(feature_cols_path, 'wb') as f:
+    pickle.dump(feature_cols, f)
+print(f"Saved feature columns: {feature_cols_path}")
+
+# Save a sample of training data for SHAP background (100 samples)
+X_train_sample = train_df_orig[feature_cols].sample(n=min(100, len(train_df_orig)), random_state=RANDOM_STATE)
+background_path = output_dir / "shap_background.parquet"
+X_train_sample.to_parquet(background_path, index=False)
+print(f"Saved SHAP background data: {background_path}")
+
+for target, models in all_models.items():
+    for model_name, model in models.items():
+        model_path = output_dir / f"{target}_{model_name}.pkl"
+        with open(model_path, 'wb') as f:
+            pickle.dump(model, f)
+        print(f"Saved model: {model_path}")
 
 # Save label encoders
 with open(output_dir / "label_encoders.pkl", 'wb') as f:
@@ -393,12 +364,9 @@ print(f"Saved: {output_dir / 'label_encoders.pkl'}")
 
 # Save model metadata (for easy loading in SHAP analysis)
 model_metadata = {
-    'timeframes': TIMEFRAMES,
     'targets': TARGET_COLS,
     'models': list(param_grids.keys()),
-    'feature_cols_by_timeframe': {
-        tf: get_feature_cols_for_timeframe(train_df_orig, tf) for tf in TIMEFRAMES
-    },
+    'feature_cols': feature_cols,
     'categorical_cols': CATEGORICAL_COLS,
     'id_cols': ID_COLS,
     'random_state': RANDOM_STATE
@@ -408,9 +376,9 @@ with open(output_dir / "model_metadata.pkl", 'wb') as f:
 print(f"Saved: {output_dir / 'model_metadata.pkl'}")
 
 # %%
-# Save BEST model for each timeframe and target (for SHAP analysis)
+# Save BEST model for each target (for SHAP analysis)
 print("\n\n" + "="*80)
-print("SAVING BEST MODELS FOR EACH TIMEFRAME AND TARGET")
+print("SAVING BEST MODELS FOR EACH TARGET")
 print("="*80)
 
 best_models_dir = output_dir / "best"
@@ -418,38 +386,32 @@ best_models_dir.mkdir(parents=True, exist_ok=True)
 
 best_model_info = {}  # Store info about best models
 
-for timeframe in TIMEFRAMES:
-    best_model_info[timeframe] = {}
+for target in TARGET_COLS:
+    # Find best model for this target
+    target_results = results_df[results_df['target'] == target]
+    best_idx = target_results['test_roc_auc'].idxmax()
+    best_row = target_results.loc[best_idx]
+    best_model_name = best_row['model_name']
+    best_roc_auc = best_row['test_roc_auc']
     
-    for target in TARGET_COLS:
-        # Find best model for this timeframe and target
-        target_results = results_df[
-            (results_df['target'] == target) & 
-            (results_df['timeframe'] == timeframe)
-        ]
-        best_idx = target_results['test_roc_auc'].idxmax()
-        best_row = target_results.loc[best_idx]
-        best_model_name = best_row['model_name']
-        best_roc_auc = best_row['test_roc_auc']
-        
-        # Get the best model
-        best_model = all_models[timeframe][target][best_model_name]
-        
-        # Save best model
-        best_model_path = best_models_dir / f"{timeframe}_{target}_best.pkl"
-        with open(best_model_path, 'wb') as f:
-            pickle.dump(best_model, f)
-        
-        # Store best model info
-        best_model_info[timeframe][target] = {
-            'model_name': best_model_name,
-            'test_roc_auc': best_roc_auc,
-            'cv_roc_auc': best_row['cv_roc_auc'],
-            'best_params': best_row['best_params'],
-            'model_path': str(best_model_path)
-        }
-        
-        print(f"  {timeframe} | {target}: {best_model_name} (ROC-AUC: {best_roc_auc:.4f})")
+    # Get the best model
+    best_model = all_models[target][best_model_name]
+    
+    # Save best model
+    best_model_path = best_models_dir / f"{target}_best.pkl"
+    with open(best_model_path, 'wb') as f:
+        pickle.dump(best_model, f)
+    
+    # Store best model info
+    best_model_info[target] = {
+        'model_name': best_model_name,
+        'test_roc_auc': best_roc_auc,
+        'cv_roc_auc': best_row['cv_roc_auc'],
+        'best_params': best_row['best_params'],
+        'model_path': str(best_model_path)
+    }
+    
+    print(f"  {target}: {best_model_name} (ROC-AUC: {best_roc_auc:.4f})")
 
 # Save best model info summary
 with open(best_models_dir / "best_model_info.pkl", 'wb') as f:
@@ -457,15 +419,13 @@ with open(best_models_dir / "best_model_info.pkl", 'wb') as f:
 
 # Also save as CSV for easy viewing
 best_model_summary = []
-for timeframe, targets in best_model_info.items():
-    for target, info in targets.items():
-        best_model_summary.append({
-            'timeframe': timeframe,
-            'target': target,
-            'best_model': info['model_name'],
-            'test_roc_auc': info['test_roc_auc'],
-            'cv_roc_auc': info['cv_roc_auc']
-        })
+for target, info in best_model_info.items():
+    best_model_summary.append({
+        'target': target,
+        'best_model': info['model_name'],
+        'test_roc_auc': info['test_roc_auc'],
+        'cv_roc_auc': info['cv_roc_auc']
+    })
 
 best_model_df = pd.DataFrame(best_model_summary)
 best_model_df.to_csv(best_models_dir / "best_model_summary.csv", index=False)
@@ -481,73 +441,59 @@ print("="*80)
 full_df = pd.concat([train_df_orig, test_df_orig], axis=0).reset_index(drop=True)
 print(f"Full dataset shape: {full_df.shape}")
 
-# Generate predictions for each timeframe
-for timeframe in TIMEFRAMES:
-    print(f"\n{'='*60}")
-    print(f"Generating predictions for timeframe: {timeframe}")
-    print(f"{'='*60}")
+# Get feature columns (all timeframes)
+feature_cols = get_feature_cols(full_df)
+X_full = full_df[feature_cols].values
+
+# Create predictions DataFrame with IDs
+predictions_df = full_df[ID_COLS].copy()
+
+# Add actual target values
+for target in TARGET_COLS:
+    predictions_df[f'{target}_actual'] = full_df[target].values
+
+# Add predictions from each model for each target
+for target in TARGET_COLS:
+    print(f"\nGenerating predictions for {target}...")
     
-    # Get feature columns for this timeframe
-    feature_cols = get_feature_cols_for_timeframe(full_df, timeframe)
-    X_full = full_df[feature_cols].values
-    
-    # Create predictions DataFrame with IDs
-    predictions_df = full_df[ID_COLS].copy()
-    
-    # Add actual target values
-    for target in TARGET_COLS:
-        predictions_df[f'{target}_actual'] = full_df[target].values
-    
-    # Add predictions from each model for each target
-    for target in TARGET_COLS:
-        print(f"\nGenerating predictions for {target}...")
+    for model_name, model in all_models[target].items():
+        # Predict probabilities (class 1 probability)
+        y_pred_proba = model.predict_proba(X_full)[:, 1]
+        y_pred_class = model.predict(X_full)
         
-        for model_name, model in all_models[timeframe][target].items():
-            # Predict probabilities (class 1 probability)
-            y_pred_proba = model.predict_proba(X_full)[:, 1]
-            y_pred_class = model.predict(X_full)
-            
-            predictions_df[f'{target}_{model_name}_proba'] = y_pred_proba
-            predictions_df[f'{target}_{model_name}_pred'] = y_pred_class
-            
-            print(f"  - {model_name}: done")
-    
-    # Save predictions for this timeframe
-    predictions_path = predictions_dir / f"all_predictions_{timeframe}.parquet"
-    predictions_df.to_parquet(predictions_path, index=False)
-    print(f"\nPredictions saved to: {predictions_path}")
-    
-    # Also save as CSV for easy viewing
-    predictions_df.to_csv(predictions_dir / f"all_predictions_{timeframe}.csv", index=False)
-    print(f"Predictions also saved to: {predictions_dir / f'all_predictions_{timeframe}.csv'}")
-    
-    # Display prediction summary
-    print(f"\nPrediction Columns ({timeframe}):")
-    print(predictions_df.columns.tolist())
-    print(f"\nPrediction DataFrame shape: {predictions_df.shape}")
+        predictions_df[f'{target}_{model_name}_proba'] = y_pred_proba
+        predictions_df[f'{target}_{model_name}_pred'] = y_pred_class
+        
+        print(f"  - {model_name}: done")
+
+# Save predictions
+predictions_path = predictions_dir / "all_predictions.parquet"
+predictions_df.to_parquet(predictions_path, index=False)
+print(f"\nPredictions saved to: {predictions_path}")
+
+# Also save as CSV for easy viewing
+predictions_df.to_csv(predictions_dir / "all_predictions.csv", index=False)
+print(f"Predictions also saved to: {predictions_dir / 'all_predictions.csv'}")
+
+# Display prediction summary
+print(f"\nPrediction Columns:")
+print(predictions_df.columns.tolist())
+print(f"\nPrediction DataFrame shape: {predictions_df.shape}")
 
 # %%
-# Find best model for each target and timeframe
+# Find best model for each target
 print("\n\n" + "="*80)
-print("BEST MODEL FOR EACH TARGET AND TIMEFRAME (by Test ROC-AUC)")
+print("BEST MODEL FOR EACH TARGET (by Test ROC-AUC)")
 print("="*80)
 
-for timeframe in TIMEFRAMES:
-    print(f"\n{'='*40}")
-    print(f"Timeframe: {timeframe}")
-    print(f"{'='*40}")
-    
-    for target in TARGET_COLS:
-        target_results = results_df[
-            (results_df['target'] == target) & 
-            (results_df['timeframe'] == timeframe)
-        ]
-        best_idx = target_results['test_roc_auc'].idxmax()
-        best_row = target_results.loc[best_idx]
-        print(f"\n{target}:")
-        print(f"  Best Model: {best_row['model_name']}")
-        print(f"  Test ROC-AUC: {best_row['test_roc_auc']:.4f}")
-        print(f"  CV ROC-AUC: {best_row['cv_roc_auc']:.4f}")
+for target in TARGET_COLS:
+    target_results = results_df[results_df['target'] == target]
+    best_idx = target_results['test_roc_auc'].idxmax()
+    best_row = target_results.loc[best_idx]
+    print(f"\n{target}:")
+    print(f"  Best Model: {best_row['model_name']}")
+    print(f"  Test ROC-AUC: {best_row['test_roc_auc']:.4f}")
+    print(f"  CV ROC-AUC: {best_row['cv_roc_auc']:.4f}")
 
 # %%
 print("\n\n" + "="*80)
@@ -555,19 +501,18 @@ print("TRAINING COMPLETE!")
 print("="*80)
 print(f"\nOutput files:")
 print(f"  - Model performance summary: result/model_performance_summary.csv")
-print(f"  - ROC-AUC comparison by timeframe: result/model_auroc_comparison_{{24h,48h,72h}}.csv")
-print(f"  - Trained models: result/models/{{timeframe}}_{{target}}_{{model}}.pkl")
-print(f"  - Predictions by timeframe (parquet): result/predictions/all_predictions_{{24h,48h,72h}}.parquet")
-print(f"  - Predictions by timeframe (csv): result/predictions/all_predictions_{{24h,48h,72h}}.csv")
+print(f"  - ROC-AUC comparison: result/model_auroc_comparison.csv")
+print(f"  - Trained models: result/models/{{target}}_{{model}}.pkl")
+print(f"  - Predictions (parquet): result/predictions/all_predictions.parquet")
+print(f"  - Predictions (csv): result/predictions/all_predictions.csv")
 print(f"\nFiles for SHAP analysis:")
-print(f"  - Best models: result/models/best/{{timeframe}}_{{target}}_best.pkl")
+print(f"  - Best models: result/models/best/{{target}}_best.pkl")
 print(f"  - Best model summary: result/models/best/best_model_summary.csv")
 print(f"  - Best model info: result/models/best/best_model_info.pkl")
-print(f"  - Feature columns: result/models/{{timeframe}}_feature_columns.pkl")
-print(f"  - SHAP background data: result/models/{{timeframe}}_shap_background.parquet")
+print(f"  - Feature columns: result/models/feature_columns.pkl")
+print(f"  - SHAP background data: result/models/shap_background.parquet")
 print(f"  - Model metadata: result/models/model_metadata.pkl")
-print(f"\nTimeframes processed: {TIMEFRAMES}")
-print(f"Targets processed: {TARGET_COLS}")
+print(f"\nTargets processed: {TARGET_COLS}")
 print(f"Models trained: {list(param_grids.keys())}")
 
 
