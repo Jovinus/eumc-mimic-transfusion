@@ -1,4 +1,18 @@
-data/*
-result/*
+# MIMIC-IV data and anything derived from it must not be committed (PhysioNet DUA)
+data/
+out/
+outputs/
+reference_output/
+*.parquet
+*.csv
+*.csv.gz
+*.pkl
+*.joblib
+*.cbm
+__pycache__/
+*.pyc
+
+# Local outputs from the legacy pipeline (kept on the `legacy` branch)
+result/
 result.zip
 catboost_info/
